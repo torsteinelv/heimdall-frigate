@@ -1,0 +1,180 @@
+name: Build and Push Heimdall Frigate
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      frigate_version:
+        description: "Frigate base image tag"
+        required: false
+        default: "stable-tensorrt"
+  schedule:
+    # Rebuild nightly so the patched image can track upstream stable-tensorrt,
+    # AND separately check for a brand-new Frigate release (including
+    # pre-releases like v0.18.0-beta1, which never becomes "stable-tensorrt")
+    # not yet built - see detect-frigate-release/build-frigate-release.
+    - cron: "17 3 * * *"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  DEFAULT_FRIGATE_VERSION: stable-tensorrt
+  HEIMDALL_FRIGATE_API_URL: https://heimdall-vision.com
+
+jobs:
+  # Nightly cron and manual dispatch only ever rebuild the moving
+  # `stable-tensorrt` tag by default - a pre-release (e.g. v0.18.0-beta1,
+  # published as its own pinned `<version>-tensorrt` image, never as
+  # `stable-tensorrt`) needs its own detection so it isn't missed.
+  detect-frigate-release:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      version: ${{ steps.detect.outputs.version }}
+      should_build: ${{ steps.detect.outputs.should_build }}
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Detect newest Frigate release (including pre-releases) not yet built
+        id: detect
+        run: |
+          set -euo pipefail
+          IMAGE_NAME_LC="$(echo "${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')"
+
+          # GitHub's own "latest release" endpoint deliberately excludes
+          # pre-releases - listing and taking the first entry (already
+          # newest-first) is what actually includes betas like v0.18.0-beta1.
+          LATEST_TAG="$(curl -sf -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/blakeblackshear/frigate/releases?per_page=1" \
+            | jq -r '.[0].tag_name // empty')"
+
+          if [ -z "$LATEST_TAG" ]; then
+            echo "::warning::Could not determine the latest Frigate release from the GitHub API - skipping this check for now"
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          VERSION="${LATEST_TAG#v}-tensorrt"
+          echo "Latest Frigate release is ${LATEST_TAG} -> image tag ${VERSION}"
+
+          if docker manifest inspect "${REGISTRY}/${IMAGE_NAME_LC}:${VERSION}" > /dev/null 2>&1; then
+            echo "${VERSION} is already built - nothing to do"
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "${VERSION} has not been built yet - will build it"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-frigate-release:
+    needs: detect-frigate-release
+    if: needs.detect-frigate-release.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set lowercase image name
+        run: echo "IMAGE_NAME_LC=${IMAGE_NAME,,}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}
+          tags: |
+            type=raw,value=${{ needs.detect-frigate-release.outputs.version }}
+
+      - name: Build and push newest Frigate release
+        # Deliberately does NOT also tag `latest` - a pre-release must never
+        # silently become what a fresh deploy pulls by default. An operator
+        # opts into a specific version (beta or not) the same way as any
+        # workflow_dispatch build: by setting the image tag explicitly in
+        # k3s-gitops.
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          build-args: |
+            FRIGATE_VERSION=${{ needs.detect-frigate-release.outputs.version }}
+            HEIMDALL_FRIGATE_API_URL=${{ env.HEIMDALL_FRIGATE_API_URL }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=frigate-release
+          cache-to: type=gha,mode=max,scope=frigate-release
+
+  build-stable:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set lowercase image name
+        run: echo "IMAGE_NAME_LC=${IMAGE_NAME,,}" >> "$GITHUB_ENV"
+
+      - name: Resolve Frigate version
+        run: |
+          if [ -n "${{ github.event.inputs.frigate_version }}" ]; then
+            echo "FRIGATE_VERSION=${{ github.event.inputs.frigate_version }}" >> "$GITHUB_ENV"
+          else
+            echo "FRIGATE_VERSION=${DEFAULT_FRIGATE_VERSION}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+            type=raw,value=${{ env.FRIGATE_VERSION }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          build-args: |
+            FRIGATE_VERSION=${{ env.FRIGATE_VERSION }}
+            HEIMDALL_FRIGATE_API_URL=${{ env.HEIMDALL_FRIGATE_API_URL }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=frigate-stable
+          cache-to: type=gha,mode=max,scope=frigate-stable
