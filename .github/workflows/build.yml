@@ -64,6 +64,7 @@ jobs:
           fi
 
           VERSION="${LATEST_TAG#v}-tensorrt"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Latest Frigate release is ${LATEST_TAG} -> image tag ${VERSION}"
 
           if docker manifest inspect "${REGISTRY}/${IMAGE_NAME_LC}:${VERSION}" > /dev/null 2>&1; then
