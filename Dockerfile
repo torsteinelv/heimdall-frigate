@@ -8,7 +8,7 @@
 #     --build-arg FRIGATE_VERSION=0.17.0-tensorrt \
 #     --build-arg HEIMDALL_FRIGATE_API_URL=https://heimdall-vision.com
 
-ARG FRIGATE_VERSION=0.17.0-tensorrt
+ARG FRIGATE_VERSION=0.18.2-tensorrt
 FROM ghcr.io/blakeblackshear/frigate:${FRIGATE_VERSION}
 
 ARG HEIMDALL_FRIGATE_API_URL=https://heimdall-vision.com
