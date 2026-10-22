@@ -113,7 +113,7 @@ jobs:
         # opts into a specific version (beta or not) the same way as any
         # workflow_dispatch build: by setting the image tag explicitly in
         # k3s-gitops.
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
@@ -201,7 +201,7 @@ jobs:
             type=raw,value=${{ env.FRIGATE_VERSION }}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
